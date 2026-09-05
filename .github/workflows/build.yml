@@ -1,0 +1,149 @@
+name: Build Release APK
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    env:
+      RELEASE_STORE_FILE: ${{ github.workspace }}/release.keystore
+      RELEASE_STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD || 'android' }}
+      RELEASE_KEY_ALIAS: ${{ secrets.KEY_ALIAS || 'release' }}
+      RELEASE_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD || 'android' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+
+      - name: Install icon tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y librsvg2-bin imagemagick
+
+      - name: Generate adaptive icon
+        run: |
+          set -e
+
+          mkdir -p app/src/main/res/mipmap-anydpi-v26
+          mkdir -p app/src/main/res/mipmap-mdpi
+          mkdir -p app/src/main/res/mipmap-hdpi
+          mkdir -p app/src/main/res/mipmap-xhdpi
+          mkdir -p app/src/main/res/mipmap-xxhdpi
+          mkdir -p app/src/main/res/mipmap-xxxhdpi
+
+          rm -f app/src/main/res/drawable/ic_launcher_background.xml || true
+          rm -f app/src/main/res/drawable/ic_launcher_foreground.xml || true
+
+          cat > /tmp/icon_background.svg <<'SVG'
+          <svg xmlns="http://www.w3.org/2000/svg" width="108" height="108" viewBox="0 0 108 108">
+            <defs>
+              <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stop-color="#4285F4"/>
+                <stop offset="100%" stop-color="#34A853"/>
+              </linearGradient>
+            </defs>
+            <circle cx="54" cy="54" r="54" fill="url(#bg)"/>
+          </svg>
+          SVG
+
+          cat > /tmp/icon_foreground.svg <<'SVG'
+          <svg xmlns="http://www.w3.org/2000/svg" width="108" height="108" viewBox="0 0 108 108">
+            <path d="M30 40 h16 l6 6 h26 a4 4 0 0 1 4 4 v20 a4 4 0 0 1 -4 4 H30 a4 4 0 0 1 -4 -4 V44 a4 4 0 0 1 4 -4 z" fill="#FFFFFF"/>
+          </svg>
+          SVG
+
+          cat > /tmp/icon_full.svg <<'SVG'
+          <svg xmlns="http://www.w3.org/2000/svg" width="108" height="108" viewBox="0 0 108 108">
+            <defs>
+              <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stop-color="#4285F4"/>
+                <stop offset="100%" stop-color="#34A853"/>
+              </linearGradient>
+            </defs>
+            <circle cx="54" cy="54" r="54" fill="url(#bg)"/>
+            <path d="M30 40 h16 l6 6 h26 a4 4 0 0 1 4 4 v20 a4 4 0 0 1 -4 4 H30 a4 4 0 0 1 -4 -4 V44 a4 4 0 0 1 4 -4 z" fill="#FFFFFF"/>
+          </svg>
+          SVG
+
+          for entry in mdpi:48:108 hdpi:72:162 xhdpi:96:216 xxhdpi:144:324 xxxhdpi:192:432; do
+            density="${entry%%:*}"
+            rest="${entry#*:}"
+            legacySize="${rest%%:*}"
+            adaptiveSize="${rest##*:}"
+
+            mkdir -p "app/src/main/res/mipmap-$density"
+
+            rsvg-convert -w "$adaptiveSize" -h "$adaptiveSize" /tmp/icon_background.svg \
+              -o "app/src/main/res/mipmap-$density/ic_launcher_background.png"
+
+            rsvg-convert -w "$adaptiveSize" -h "$adaptiveSize" /tmp/icon_foreground.svg \
+              -o "app/src/main/res/mipmap-$density/ic_launcher_foreground.png"
+
+            rsvg-convert -w "$legacySize" -h "$legacySize" /tmp/icon_full.svg \
+              -o "app/src/main/res/mipmap-$density/ic_launcher.png"
+
+            cp "app/src/main/res/mipmap-$density/ic_launcher.png" \
+               "app/src/main/res/mipmap-$density/ic_launcher_round.png"
+          done
+
+          cat > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@mipmap/ic_launcher_background"/>
+              <foreground android:drawable="@mipmap/ic_launcher_foreground"/>
+          </adaptive-icon>
+          XML
+
+          cp app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml
+
+      - name: Prepare signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RELEASE_STORE_FILE"
+          else
+            keytool -genkeypair -v \
+              -keystore "$RELEASE_STORE_FILE" \
+              -alias "$RELEASE_KEY_ALIAS" \
+              -storepass "$RELEASE_STORE_PASSWORD" \
+              -keypass "$RELEASE_KEY_PASSWORD" \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=File Manager, OU=Dev, O=Manager, L=Internet, S=Internet, C=US"
+          fi
+
+      - name: Build release APK
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      - name: Rename APK
+        run: |
+          mv app/build/outputs/apk/release/app-release.apk \
+             app/build/outputs/apk/release/FileManager.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FileManager
+          path: app/build/outputs/apk/release/FileManager.apk
